@@ -1,0 +1,110 @@
+#include <WiFi.h> // NOTE: Change to <ESP8266WiFi.h> if you are using an ESP8266
+#include <WiFiUdp.h>
+
+// --- Wi-Fi Credentials ---
+const char* ssid = "ESP32-Drone";
+const char* password = "12345678";
+
+// --- Drone Settings ---
+const char* droneIP = "192.168.43.42";
+const int dronePort = 2390; // Default Crazyflie/LiteWing UDP port
+
+WiFiUDP udp;
+
+// --- Flight Variables ---
+float currentRoll = 0.0;
+float currentPitch = 0.0;
+float currentYaw = 0.0;
+uint16_t currentThrust = 0;
+
+// --- State Machine Variables ---
+unsigned long stateStartTime = 0;
+int flightState = 0;
+unsigned long lastSendTime = 0;
+const int sendInterval = 10; // Send packet every 10ms (100Hz)
+
+// --- CRTP Packet Structure ---
+// Port 3 (Commander), Channel 0 is used for legacy setpoints
+struct __attribute__((packed)) CrtpSetpoint {
+  uint8_t header; // 0x30 represents Port 3, Channel 0
+  float roll;
+  float pitch;
+  float yaw;
+  uint16_t thrust;
+};
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Hello World to LiteWing");
+
+  // Connect to the Wi-Fi network the drone is on
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected.");
+
+  udp.begin(2390); // Initialize UDP
+
+  Serial.println("Connected to drone network. Waiting for stability...");
+  delay(1000); // Wait after connection
+
+  Serial.println("Sending zero setpoint to unlock safety...");
+  stateStartTime = millis();
+}
+
+// Function to construct and send the CRTP UDP payload
+void sendCrtpSetpoint(float roll, float pitch, float yaw, uint16_t thrust) {
+  CrtpSetpoint packet;
+  packet.header = 0x30; 
+  packet.roll = roll;
+  packet.pitch = pitch;
+  packet.yaw = yaw;
+  packet.thrust = thrust;
+
+  udp.beginPacket(droneIP, dronePort);
+  udp.write((uint8_t*)&packet, sizeof(packet));
+  udp.endPacket();
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+
+  // --- Flight Sequence State Machine ---
+  // Mimics the time.sleep() sequence from Python without blocking the loop
+  
+  if (flightState == 0) {
+    // State 0: Unlock safety (Wait 0.1s)
+    currentRoll = 0; currentPitch = 0; currentYaw = 0; currentThrust = 0;
+    if (currentTime - stateStartTime > 100) { 
+      Serial.println("Starting motors at minimum speed...");
+      flightState = 1;
+      stateStartTime = currentTime;
+    }
+  } 
+  else if (flightState == 1) {
+    // State 1: Start motors at 10000 thrust (Wait 1.0s)
+    currentRoll = 0; currentPitch = 0; currentYaw = 0; currentThrust = 10000;
+    if (currentTime - stateStartTime > 1000) { 
+      Serial.println("Stopping motors...");
+      flightState = 2;
+      stateStartTime = currentTime;
+    }
+  } 
+  else if (flightState == 2) {
+    // State 2: Stop motors (Wait 0.1s)
+    currentRoll = 0; currentPitch = 0; currentYaw = 0; currentThrust = 0;
+    if (currentTime - stateStartTime > 100) { 
+      Serial.println("Test complete.");
+      flightState = 3; // Move to idle state
+    }
+  }
+
+  // --- Continuous Transmission ---
+  // The drone requires a steady stream of commands to keep the connection alive
+  if (flightState < 3 && (currentTime - lastSendTime >= sendInterval)) {
+    sendCrtpSetpoint(currentRoll, currentPitch, currentYaw, currentThrust);
+    lastSendTime = currentTime;}
+}
